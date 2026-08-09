@@ -110,4 +110,32 @@ BallTrack BallTracker::build_track(const std::vector<BallObservation>& candidate
   return result;
 }
 
+std::optional<BallObservation> BallTracker::predict_previous_observation(
+    const BallTrack& track) const {
+  if (track.points.size() < 2) {
+    return std::nullopt;
+  }
+
+  const BallObservation& first = track.points[0].observation;
+  const BallObservation& second = track.points[1].observation;
+  const std::int64_t frame_gap = second.frame_index - first.frame_index;
+  const double time_gap_ms = second.timestamp_ms - first.timestamp_ms;
+  if (first.frame_index <= 0 || frame_gap <= 0 || time_gap_ms <= 0.0) {
+    return std::nullopt;
+  }
+
+  const double milliseconds_per_frame = time_gap_ms / frame_gap;
+  const cv::Point2f velocity = velocity_between(first, second);
+  const cv::Point2f predicted_center = first.center - velocity *
+      static_cast<float>(milliseconds_per_frame / 1000.0);
+
+  return BallObservation{
+      .frame_index = first.frame_index - 1,
+      .timestamp_ms = first.timestamp_ms - milliseconds_per_frame,
+      .center = predicted_center,
+      .radius_px = first.radius_px,
+      .confidence = 0.0F,
+  };
+}
+
 }  // namespace launch_monitor::vision

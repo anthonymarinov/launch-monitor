@@ -13,6 +13,7 @@ struct BallObservation {
   cv::Point2f center{};
   float radius_px{};
   float confidence{};
+  bool recovered{};
 };
 
 struct BallDetectorConfig {
@@ -41,6 +42,13 @@ struct BallDetectorConfig {
   float max_candidate_radius_tee_ratio{1.60F};
   float min_candidate_confidence{0.65F};
   float min_motion_distance_radii{1.50F};
+
+  float recovery_search_radius_radii{2.50F};
+  float recovery_max_center_error_radii{1.15F};
+  float recovery_max_radius_ratio{1.35F};
+  float recovery_min_brightness{95.0F};
+  float recovery_min_saturation{15.0F};
+  float recovery_min_confidence{0.35F};
 };
 
 class BallDetector {
@@ -58,6 +66,11 @@ class BallDetector {
       const BallObservation& tee_ball,
       std::int64_t frame_index,
       double timestamp_ms) const;
+
+  [[nodiscard]] std::optional<BallObservation> locate_near_prediction(
+      const cv::Mat& frame,
+      const cv::Mat& motion_mask,
+      const BallObservation& prediction) const;
 
  private:
   BallDetectorConfig config_;

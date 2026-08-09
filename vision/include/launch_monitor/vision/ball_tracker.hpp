@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <vector>
 
 #include <launch_monitor/vision/ball_detector.hpp>
@@ -31,6 +32,9 @@ class BallTracker {
 
   [[nodiscard]] BallTrack build_track(
       const std::vector<BallObservation>& candidates) const;
+
+  [[nodiscard]] std::optional<BallObservation> predict_previous_observation(
+      const BallTrack& track) const;
 
  private:
   BallTrackerConfig config_;

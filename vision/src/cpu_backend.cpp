@@ -49,6 +49,7 @@ void draw_track_overlay(cv::Mat& frame,
                         const launch_monitor::vision::BallTrack& track,
                         std::int64_t frame_index) {
   const cv::Scalar kTrackColor{255, 0, 255};
+  const cv::Scalar kRecoveredColor{255, 255, 0};
   std::vector<cv::Point> visible_points;
 
   for (size_t index = 0; index < track.points.size(); ++index) {
@@ -65,19 +66,23 @@ void draw_track_overlay(cv::Mat& frame,
       cv::line(frame, visible_points.back(), center, kTrackColor, 2);
     }
     visible_points.push_back(center);
+    const cv::Scalar& point_color = tracked_point.observation.recovered
+                                        ? kRecoveredColor
+                                        : kTrackColor;
     cv::circle(frame,
                center,
                static_cast<int>(std::lround(tracked_point.observation.radius_px)),
-               kTrackColor,
+               point_color,
                3);
 
     if (tracked_point.observation.frame_index == frame_index) {
       cv::putText(frame,
-                  "Track " + std::to_string(index + 1),
+                  (tracked_point.observation.recovered ? "Recovered " : "Track ") +
+                      std::to_string(index + 1),
                   center + cv::Point{12, -12},
                   cv::FONT_HERSHEY_SIMPLEX,
                   0.7,
-                  kTrackColor,
+                  point_color,
                   2);
     }
   }
@@ -184,7 +189,46 @@ bool launch_monitor::vision::frame_difference(
   }
 
   BallTracker ball_tracker;
-  const BallTrack track = ball_tracker.build_track(candidate_observations);
+  BallTrack track = ball_tracker.build_track(candidate_observations);
+  if (const auto prediction = ball_tracker.predict_previous_observation(track);
+      prediction.has_value()) {
+    cv::VideoCapture recovery_cap(input_path.string());
+    cv::Mat recovery_frame;
+    for (std::int64_t index = 0;
+         index <= prediction->frame_index && recovery_cap.read(recovery_frame);
+         ++index) {
+    }
+
+    if (recovery_frame.empty()) {
+      std::cerr << "could not read predicted recovery frame "
+                << prediction->frame_index << '\n';
+    } else {
+      BallObservation recovery_prediction = *prediction;
+      recovery_prediction.timestamp_ms = recovery_cap.get(cv::CAP_PROP_POS_MSEC);
+
+      cv::Mat recovery_gray;
+      cv::Mat recovery_diff;
+      cv::Mat recovery_motion;
+      cv::cvtColor(recovery_frame, recovery_gray, cv::COLOR_BGR2GRAY);
+      cv::GaussianBlur(recovery_gray, recovery_gray, cv::Size(5, 5), 0);
+      cv::absdiff(background, recovery_gray, recovery_diff);
+      cv::threshold(recovery_diff, recovery_motion, 30, 255, cv::THRESH_BINARY);
+
+      const auto recovered_ball = ball_detector.locate_near_prediction(
+          recovery_frame, recovery_motion, recovery_prediction);
+      if (recovered_ball.has_value()) {
+        candidate_observations.push_back(*recovered_ball);
+        write_observation(*recovered_ball, "recovered");
+        track = ball_tracker.build_track(candidate_observations);
+        std::cout << "recovered ball at frame " << recovered_ball->frame_index
+                  << " with confidence " << recovered_ball->confidence << '\n';
+      } else {
+        std::cout << "no ball recovered at predicted frame "
+                  << recovery_prediction.frame_index << '\n';
+      }
+    }
+  }
+
   const std::filesystem::path track_path = output_path.parent_path() / "ball_track.csv";
   std::ofstream track_file(track_path);
   if (!track_file.is_open()) {
@@ -192,7 +236,7 @@ bool launch_monitor::vision::frame_difference(
     return false;
   }
   track_file << "frame,timestamp_ms,x_px,y_px,radius_px,confidence,"
-                "vx_px_s,vy_px_s,speed_px_s\n";
+                "vx_px_s,vy_px_s,speed_px_s,kind\n";
   track_file << std::fixed << std::setprecision(3);
   for (const TrackedBallObservation& point : track.points) {
     const BallObservation& observation = point.observation;
@@ -200,7 +244,8 @@ bool launch_monitor::vision::frame_difference(
                << observation.center.x << ',' << observation.center.y << ','
                << observation.radius_px << ',' << observation.confidence << ','
                << point.velocity_px_per_s.x << ',' << point.velocity_px_per_s.y << ','
-               << point.speed_px_per_s << '\n';
+               << point.speed_px_per_s << ','
+               << (observation.recovered ? "recovered" : "detected") << '\n';
   }
 
   if (track.points.empty()) {

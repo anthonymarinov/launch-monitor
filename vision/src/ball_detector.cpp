@@ -353,4 +353,110 @@ std::optional<BallObservation> BallDetector::locate_moving_ball(
   return best_observation;
 }
 
+std::optional<BallObservation> BallDetector::locate_near_prediction(
+    const cv::Mat& frame,
+    const cv::Mat& motion_mask,
+    const BallObservation& prediction) const {
+  if (frame.empty() || frame.channels() != 3 || motion_mask.empty() ||
+      motion_mask.type() != CV_8UC1 || frame.size() != motion_mask.size()) {
+    return std::nullopt;
+  }
+
+  const int search_radius = static_cast<int>(std::ceil(
+      prediction.radius_px * config_.recovery_search_radius_radii));
+  const cv::Rect frame_bounds{0, 0, frame.cols, frame.rows};
+  const cv::Rect search_region{
+      static_cast<int>(std::lround(prediction.center.x)) - search_radius,
+      static_cast<int>(std::lround(prediction.center.y)) - search_radius,
+      search_radius * 2,
+      search_radius * 2,
+  };
+  const cv::Rect region = search_region & frame_bounds;
+  if (region.empty()) {
+    return std::nullopt;
+  }
+
+  cv::Mat gray;
+  cv::cvtColor(frame(region), gray, cv::COLOR_BGR2GRAY);
+  cv::GaussianBlur(gray, gray, cv::Size(5, 5), 1.5);
+
+  std::vector<cv::Vec3f> circles;
+  cv::HoughCircles(gray,
+                   circles,
+                   cv::HOUGH_GRADIENT,
+                   1.0,
+                   prediction.radius_px,
+                   100.0,
+                   12.0,
+                   static_cast<int>(std::max(10.0F, prediction.radius_px * 0.45F)),
+                   static_cast<int>(prediction.radius_px * 1.70F));
+  if (circles.empty()) {
+    return std::nullopt;
+  }
+
+  cv::Mat hsv;
+  cv::cvtColor(frame, hsv, cv::COLOR_BGR2HSV);
+  std::optional<BallObservation> best_observation;
+  float best_score = -std::numeric_limits<float>::infinity();
+
+  for (const cv::Vec3f& circle : circles) {
+    const cv::Point2f center{circle[0] + region.x, circle[1] + region.y};
+    const float radius = circle[2];
+    const float distance_from_prediction = cv::norm(center - prediction.center);
+    if (distance_from_prediction >
+            prediction.radius_px * config_.recovery_max_center_error_radii ||
+        radius > prediction.radius_px * config_.recovery_max_radius_ratio) {
+      continue;
+    }
+
+    cv::Mat circle_mask = cv::Mat::zeros(frame.size(), CV_8UC1);
+    cv::circle(circle_mask,
+               center,
+               static_cast<int>(std::lround(radius * 0.65F)),
+               cv::Scalar{255},
+               -1);
+    const cv::Scalar mean_hsv = cv::mean(hsv, circle_mask);
+    const float mean_saturation = static_cast<float>(mean_hsv[1]);
+    const float mean_brightness = static_cast<float>(mean_hsv[2]);
+    if (mean_brightness < config_.recovery_min_brightness ||
+        mean_saturation < config_.recovery_min_saturation) {
+      continue;
+    }
+
+    const float motion_score = static_cast<float>(cv::mean(motion_mask, circle_mask)[0] / 255.0);
+    const float distance_score = clamp_unit(
+        1.0F - distance_from_prediction / static_cast<float>(search_radius));
+    const float radius_score = clamp_unit(
+        1.0F - std::abs(radius - prediction.radius_px) / prediction.radius_px);
+    const float brightness_score = clamp_unit(
+        (mean_brightness - config_.recovery_min_brightness) /
+        (255.0F - config_.recovery_min_brightness));
+    const float saturation_score = clamp_unit(
+        (mean_saturation - config_.recovery_min_saturation) /
+        (255.0F - config_.recovery_min_saturation));
+    const float score = 0.35F * motion_score + 0.30F * distance_score +
+                        0.15F * radius_score + 0.10F * brightness_score +
+                        0.10F * saturation_score;
+    if (score <= best_score) {
+      continue;
+    }
+
+    best_score = score;
+    best_observation = BallObservation{
+        .frame_index = prediction.frame_index,
+        .timestamp_ms = prediction.timestamp_ms,
+        .center = center,
+        .radius_px = radius,
+        .confidence = score,
+        .recovered = true,
+    };
+  }
+
+  if (!best_observation.has_value() ||
+      best_observation->confidence < config_.recovery_min_confidence) {
+    return std::nullopt;
+  }
+  return best_observation;
+}
+
 }  // namespace launch_monitor::vision
