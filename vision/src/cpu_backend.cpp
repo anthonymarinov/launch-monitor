@@ -1,4 +1,5 @@
 #include <launch_monitor/vision/ball_detector.hpp>
+#include <launch_monitor/vision/ball_kalman_tracker.hpp>
 #include <launch_monitor/vision/ball_tracker.hpp>
 #include <launch_monitor/vision/main.hpp>
 
@@ -74,6 +75,19 @@ void draw_track_overlay(cv::Mat& frame,
                static_cast<int>(std::lround(tracked_point.observation.radius_px)),
                point_color,
                3);
+
+    if (tracked_point.observation.recovered) {
+      const cv::Point measured_center{
+          static_cast<int>(std::lround(tracked_point.measured_center_px.x)),
+          static_cast<int>(std::lround(tracked_point.measured_center_px.y)),
+      };
+      cv::drawMarker(frame,
+                     measured_center,
+                     kRecoveredColor,
+                     cv::MARKER_TILTED_CROSS,
+                     16,
+                     2);
+    }
 
     if (tracked_point.observation.frame_index == frame_index) {
       cv::putText(frame,
@@ -189,8 +203,8 @@ bool launch_monitor::vision::frame_difference(
   }
 
   BallTracker ball_tracker;
-  BallTrack track = ball_tracker.build_track(candidate_observations);
-  if (const auto prediction = ball_tracker.predict_previous_observation(track);
+  BallTrack raw_track = ball_tracker.build_track(candidate_observations);
+  if (const auto prediction = ball_tracker.predict_previous_observation(raw_track);
       prediction.has_value()) {
     cv::VideoCapture recovery_cap(input_path.string());
     cv::Mat recovery_frame;
@@ -219,7 +233,7 @@ bool launch_monitor::vision::frame_difference(
       if (recovered_ball.has_value()) {
         candidate_observations.push_back(*recovered_ball);
         write_observation(*recovered_ball, "recovered");
-        track = ball_tracker.build_track(candidate_observations);
+        raw_track = ball_tracker.build_track(candidate_observations);
         std::cout << "recovered ball at frame " << recovered_ball->frame_index
                   << " with confidence " << recovered_ball->confidence << '\n';
       } else {
@@ -229,18 +243,23 @@ bool launch_monitor::vision::frame_difference(
     }
   }
 
+  BallKalmanTracker kalman_tracker;
+  const BallTrack track = kalman_tracker.smooth(raw_track);
+
   const std::filesystem::path track_path = output_path.parent_path() / "ball_track.csv";
   std::ofstream track_file(track_path);
   if (!track_file.is_open()) {
     std::cerr << "error creating track file: " << track_path << '\n';
     return false;
   }
-  track_file << "frame,timestamp_ms,x_px,y_px,radius_px,confidence,"
+  track_file << "frame,timestamp_ms,measured_x_px,measured_y_px,x_px,y_px,"
+                "radius_px,confidence,"
                 "vx_px_s,vy_px_s,speed_px_s,kind\n";
   track_file << std::fixed << std::setprecision(3);
   for (const TrackedBallObservation& point : track.points) {
     const BallObservation& observation = point.observation;
     track_file << observation.frame_index << ',' << observation.timestamp_ms << ','
+               << point.measured_center_px.x << ',' << point.measured_center_px.y << ','
                << observation.center.x << ',' << observation.center.y << ','
                << observation.radius_px << ',' << observation.confidence << ','
                << point.velocity_px_per_s.x << ',' << point.velocity_px_per_s.y << ','

@@ -9,6 +9,7 @@ namespace launch_monitor::vision {
 
 struct TrackedBallObservation {
   BallObservation observation;
+  cv::Point2f measured_center_px{};
   cv::Point2f velocity_px_per_s{};
   float speed_px_per_s{};
 };

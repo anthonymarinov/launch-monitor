@@ -1,5 +1,6 @@
 add_library(lm_vision
   src/ball_detector.cpp
+  src/ball_kalman_tracker.cpp
   src/ball_tracker.cpp
   src/pipeline.cpp
 )
@@ -16,12 +17,14 @@ find_package(OpenCV REQUIRED COMPONENTS
   core
   geometry
   imgproc
+  video
   videoio
 )
 target_link_libraries(lm_vision PRIVATE
   opencv_core
   opencv_geometry
   opencv_imgproc
+  opencv_video
   opencv_videoio
 )
 

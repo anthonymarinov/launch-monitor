@@ -96,6 +96,7 @@ BallTrack BallTracker::build_track(const std::vector<BallObservation>& candidate
 
     result.points.push_back(TrackedBallObservation{
         .observation = best_track[index],
+        .measured_center_px = best_track[index].center,
         .velocity_px_per_s = velocity,
         .speed_px_per_s = static_cast<float>(cv::norm(velocity)),
     });
