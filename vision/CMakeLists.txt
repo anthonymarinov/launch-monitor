@@ -10,8 +10,18 @@ target_include_directories(lm_vision
 
 target_link_libraries(lm_vision PUBLIC launch_monitor::core)
 
-find_package(OpenCV REQUIRED COMPONENTS core imgproc)
-target_link_libraries(lm_vision PRIVATE opencv_core opencv_imgproc)
+find_package(OpenCV REQUIRED COMPONENTS
+  core
+  geometry
+  imgproc
+  videoio
+)
+target_link_libraries(lm_vision PRIVATE
+  opencv_core
+  opencv_geometry
+  opencv_imgproc
+  opencv_videoio
+)
 
 if(LAUNCH_MONITOR_ENABLE_CUDA)
   find_package(CUDAToolkit REQUIRED)

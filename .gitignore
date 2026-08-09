@@ -1,4 +1,6 @@
 /build/
 /build-*/
+/data/
+/output/
 
 CMakeUserPresets.json
