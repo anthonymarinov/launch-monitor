@@ -1,8 +1,10 @@
+#include <launch_monitor/vision/ball_detector.hpp>
 #include <launch_monitor/vision/main.hpp>
 
 #include <opencv2/opencv.hpp>
 #include <opencv2/geometry/2d.hpp>
 
+#include <cmath>
 #include <iostream>
 
 int launch_monitor::vision::cuda_device_count() {
@@ -51,9 +53,54 @@ bool launch_monitor::vision::frame_difference(
   // apply slight blur to background to smooth camera sensor noise
   cv::GaussianBlur(background, background, cv::Size(5, 5), 0);
 
+  BallDetector ball_detector;
+  const auto tee_ball = ball_detector.locate_stationary_ball(
+      frame,
+      0,
+      cap.get(cv::CAP_PROP_POS_MSEC));
+
+  cv::Mat annotated_first_frame = frame.clone();
+  if (tee_ball.has_value()) {
+    const cv::Point center{
+        static_cast<int>(std::lround(tee_ball->center.x)),
+        static_cast<int>(std::lround(tee_ball->center.y)),
+    };
+    cv::circle(annotated_first_frame,
+               center,
+               static_cast<int>(std::lround(tee_ball->radius_px)),
+               cv::Scalar(0, 165, 255),
+               3);
+    cv::putText(annotated_first_frame,
+                "Tee ball",
+                center + cv::Point{12, -12},
+                cv::FONT_HERSHEY_SIMPLEX,
+                0.8,
+                cv::Scalar(0, 165, 255),
+                2);
+    std::cout << "tee ball at (" << tee_ball->center.x << ", "
+              << tee_ball->center.y << "), radius " << tee_ball->radius_px
+              << " px, confidence " << tee_ball->confidence << '\n';
+  } else {
+    std::cerr << "could not locate a stationary tee ball in the first frame\n";
+  }
+  output.write(annotated_first_frame);
+
   while (true) {
     cap >> frame;
     if (frame.empty()) break; // end of video
+
+    if (tee_ball.has_value()) {
+      const cv::Point tee_center{
+          static_cast<int>(std::lround(tee_ball->center.x)),
+          static_cast<int>(std::lround(tee_ball->center.y)),
+      };
+      cv::drawMarker(frame,
+                     tee_center,
+                     cv::Scalar(0, 165, 255),
+                     cv::MARKER_CROSS,
+                     18,
+                     2);
+    }
 
     // convert the current live frame to grayscale and blur it
     cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);

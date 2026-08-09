@@ -1,4 +1,5 @@
 add_library(lm_vision
+  src/ball_detector.cpp
   src/pipeline.cpp
 )
 
