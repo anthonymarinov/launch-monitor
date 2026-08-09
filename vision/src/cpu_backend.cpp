@@ -5,6 +5,8 @@
 #include <opencv2/geometry/2d.hpp>
 
 #include <cmath>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 
 int launch_monitor::vision::cuda_device_count() {
@@ -48,6 +50,24 @@ bool launch_monitor::vision::frame_difference(
     return false;
   }
 
+  const std::filesystem::path observations_path =
+      output_path.parent_path() / "ball_observations.csv";
+  std::ofstream observations_file(observations_path);
+  if (!observations_file.is_open()) {
+    std::cerr << "error creating observations file: " << observations_path << '\n';
+    return false;
+  }
+  observations_file << "frame,timestamp_ms,x_px,y_px,radius_px,confidence,kind\n";
+  observations_file << std::fixed << std::setprecision(3);
+
+  const auto write_observation = [&observations_file](const BallObservation& observation,
+                                                        const char* kind) {
+    observations_file << observation.frame_index << ',' << observation.timestamp_ms << ','
+                      << observation.center.x << ',' << observation.center.y << ','
+                      << observation.radius_px << ',' << observation.confidence << ','
+                      << kind << '\n';
+  };
+
   cv::cvtColor(frame, background, cv::COLOR_BGR2GRAY);
 
   // apply slight blur to background to smooth camera sensor noise
@@ -80,14 +100,16 @@ bool launch_monitor::vision::frame_difference(
     std::cout << "tee ball at (" << tee_ball->center.x << ", "
               << tee_ball->center.y << "), radius " << tee_ball->radius_px
               << " px, confidence " << tee_ball->confidence << '\n';
+    write_observation(*tee_ball, "tee");
   } else {
     std::cerr << "could not locate a stationary tee ball in the first frame\n";
   }
   output.write(annotated_first_frame);
 
-  while (true) {
-    cap >> frame;
-    if (frame.empty()) break; // end of video
+  std::int64_t frame_index = 0;
+  while (cap.read(frame)) {
+    ++frame_index;
+    const double timestamp_ms = cap.get(cv::CAP_PROP_POS_MSEC);
 
     if (tee_ball.has_value()) {
       const cv::Point tee_center{
@@ -113,23 +135,35 @@ bool launch_monitor::vision::frame_difference(
     // Adjust the '30' threshold value depending on your video's lighting
     cv::threshold(diff, thresh, 30, 255, cv::THRESH_BINARY);
 
-    // 3. Find Contours: Group the white pixels into shapes
-    std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(thresh, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-
-    // Draw bounding boxes around anything moving
-    for (size_t i = 0; i < contours.size(); i++) {
-        // Filter out tiny specks of noise
-        if (cv::contourArea(contours[i]) > 100) {
-            cv::Rect bounding_box = cv::boundingRect(contours[i]);
-            cv::rectangle(frame, bounding_box, cv::Scalar(0, 255, 0), 2);
-        }
+    if (tee_ball.has_value()) {
+      const auto moving_ball = ball_detector.locate_moving_ball(
+          frame, thresh, *tee_ball, frame_index, timestamp_ms);
+      if (moving_ball.has_value()) {
+        const cv::Point center{
+            static_cast<int>(std::lround(moving_ball->center.x)),
+            static_cast<int>(std::lround(moving_ball->center.y)),
+        };
+        cv::circle(frame,
+                   center,
+                   static_cast<int>(std::lround(moving_ball->radius_px)),
+                   cv::Scalar(255, 0, 255),
+                   3);
+        cv::putText(frame,
+                    "Ball candidate",
+                    center + cv::Point{12, -12},
+                    cv::FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    cv::Scalar(255, 0, 255),
+                    2);
+        write_observation(*moving_ball, "candidate");
+      }
     }
 
     output.write(frame);
   }
 
   std::cout << "wrote tracking video to " << output_path << '\n';
+  std::cout << "wrote ball observations to " << observations_path << '\n';
 
   return true;
 }
