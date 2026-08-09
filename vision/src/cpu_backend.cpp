@@ -1,4 +1,5 @@
 #include <launch_monitor/vision/ball_detector.hpp>
+#include <launch_monitor/vision/ball_tracker.hpp>
 #include <launch_monitor/vision/main.hpp>
 
 #include <opencv2/opencv.hpp>
@@ -8,6 +9,81 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <string>
+#include <vector>
+
+namespace {
+
+void draw_tee_marker(cv::Mat& frame,
+                     const launch_monitor::vision::BallObservation& tee_ball,
+                     std::int64_t frame_index) {
+  const cv::Point center{
+      static_cast<int>(std::lround(tee_ball.center.x)),
+      static_cast<int>(std::lround(tee_ball.center.y)),
+  };
+  if (frame_index == 0) {
+    cv::circle(frame,
+               center,
+               static_cast<int>(std::lround(tee_ball.radius_px)),
+               cv::Scalar(0, 165, 255),
+               3);
+    cv::putText(frame,
+                "Tee ball",
+                center + cv::Point{12, -12},
+                cv::FONT_HERSHEY_SIMPLEX,
+                0.8,
+                cv::Scalar(0, 165, 255),
+                2);
+    return;
+  }
+
+  cv::drawMarker(frame,
+                 center,
+                 cv::Scalar(0, 165, 255),
+                 cv::MARKER_CROSS,
+                 18,
+                 2);
+}
+
+void draw_track_overlay(cv::Mat& frame,
+                        const launch_monitor::vision::BallTrack& track,
+                        std::int64_t frame_index) {
+  const cv::Scalar kTrackColor{255, 0, 255};
+  std::vector<cv::Point> visible_points;
+
+  for (size_t index = 0; index < track.points.size(); ++index) {
+    const auto& tracked_point = track.points[index];
+    if (tracked_point.observation.frame_index > frame_index) {
+      break;
+    }
+
+    const cv::Point center{
+        static_cast<int>(std::lround(tracked_point.observation.center.x)),
+        static_cast<int>(std::lround(tracked_point.observation.center.y)),
+    };
+    if (!visible_points.empty()) {
+      cv::line(frame, visible_points.back(), center, kTrackColor, 2);
+    }
+    visible_points.push_back(center);
+    cv::circle(frame,
+               center,
+               static_cast<int>(std::lround(tracked_point.observation.radius_px)),
+               kTrackColor,
+               3);
+
+    if (tracked_point.observation.frame_index == frame_index) {
+      cv::putText(frame,
+                  "Track " + std::to_string(index + 1),
+                  center + cv::Point{12, -12},
+                  cv::FONT_HERSHEY_SIMPLEX,
+                  0.7,
+                  kTrackColor,
+                  2);
+    }
+  }
+}
+
+}  // namespace
 
 int launch_monitor::vision::cuda_device_count() {
   return 0;
@@ -30,6 +106,7 @@ bool launch_monitor::vision::frame_difference(
     std::cerr << "video contains no readable frames: " << input_path << '\n';
     return false;
   }
+  const cv::Size frame_size = frame.size();
 
   std::error_code error;
   std::filesystem::create_directories(output_path.parent_path(), error);
@@ -40,15 +117,6 @@ bool launch_monitor::vision::frame_difference(
 
   const double input_fps = cap.get(cv::CAP_PROP_FPS);
   const double output_fps = input_fps > 0.0 ? input_fps : 30.0;
-  cv::VideoWriter output(
-      output_path.string(),
-      cv::VideoWriter::fourcc('m', 'p', '4', 'v'),
-      output_fps,
-      frame.size());
-  if (!output.isOpened()) {
-    std::cerr << "error creating output video: " << output_path << '\n';
-    return false;
-  }
 
   const std::filesystem::path observations_path =
       output_path.parent_path() / "ball_observations.csv";
@@ -79,24 +147,7 @@ bool launch_monitor::vision::frame_difference(
       0,
       cap.get(cv::CAP_PROP_POS_MSEC));
 
-  cv::Mat annotated_first_frame = frame.clone();
   if (tee_ball.has_value()) {
-    const cv::Point center{
-        static_cast<int>(std::lround(tee_ball->center.x)),
-        static_cast<int>(std::lround(tee_ball->center.y)),
-    };
-    cv::circle(annotated_first_frame,
-               center,
-               static_cast<int>(std::lround(tee_ball->radius_px)),
-               cv::Scalar(0, 165, 255),
-               3);
-    cv::putText(annotated_first_frame,
-                "Tee ball",
-                center + cv::Point{12, -12},
-                cv::FONT_HERSHEY_SIMPLEX,
-                0.8,
-                cv::Scalar(0, 165, 255),
-                2);
     std::cout << "tee ball at (" << tee_ball->center.x << ", "
               << tee_ball->center.y << "), radius " << tee_ball->radius_px
               << " px, confidence " << tee_ball->confidence << '\n';
@@ -104,25 +155,12 @@ bool launch_monitor::vision::frame_difference(
   } else {
     std::cerr << "could not locate a stationary tee ball in the first frame\n";
   }
-  output.write(annotated_first_frame);
 
+  std::vector<BallObservation> candidate_observations;
   std::int64_t frame_index = 0;
   while (cap.read(frame)) {
     ++frame_index;
     const double timestamp_ms = cap.get(cv::CAP_PROP_POS_MSEC);
-
-    if (tee_ball.has_value()) {
-      const cv::Point tee_center{
-          static_cast<int>(std::lround(tee_ball->center.x)),
-          static_cast<int>(std::lround(tee_ball->center.y)),
-      };
-      cv::drawMarker(frame,
-                     tee_center,
-                     cv::Scalar(0, 165, 255),
-                     cv::MARKER_CROSS,
-                     18,
-                     2);
-    }
 
     // convert the current live frame to grayscale and blur it
     cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
@@ -139,31 +177,69 @@ bool launch_monitor::vision::frame_difference(
       const auto moving_ball = ball_detector.locate_moving_ball(
           frame, thresh, *tee_ball, frame_index, timestamp_ms);
       if (moving_ball.has_value()) {
-        const cv::Point center{
-            static_cast<int>(std::lround(moving_ball->center.x)),
-            static_cast<int>(std::lround(moving_ball->center.y)),
-        };
-        cv::circle(frame,
-                   center,
-                   static_cast<int>(std::lround(moving_ball->radius_px)),
-                   cv::Scalar(255, 0, 255),
-                   3);
-        cv::putText(frame,
-                    "Ball candidate",
-                    center + cv::Point{12, -12},
-                    cv::FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    cv::Scalar(255, 0, 255),
-                    2);
+        candidate_observations.push_back(*moving_ball);
         write_observation(*moving_ball, "candidate");
       }
     }
+  }
 
+  BallTracker ball_tracker;
+  const BallTrack track = ball_tracker.build_track(candidate_observations);
+  const std::filesystem::path track_path = output_path.parent_path() / "ball_track.csv";
+  std::ofstream track_file(track_path);
+  if (!track_file.is_open()) {
+    std::cerr << "error creating track file: " << track_path << '\n';
+    return false;
+  }
+  track_file << "frame,timestamp_ms,x_px,y_px,radius_px,confidence,"
+                "vx_px_s,vy_px_s,speed_px_s\n";
+  track_file << std::fixed << std::setprecision(3);
+  for (const TrackedBallObservation& point : track.points) {
+    const BallObservation& observation = point.observation;
+    track_file << observation.frame_index << ',' << observation.timestamp_ms << ','
+               << observation.center.x << ',' << observation.center.y << ','
+               << observation.radius_px << ',' << observation.confidence << ','
+               << point.velocity_px_per_s.x << ',' << point.velocity_px_per_s.y << ','
+               << point.speed_px_per_s << '\n';
+  }
+
+  if (track.points.empty()) {
+    std::cerr << "could not form a valid ball track from the candidates\n";
+  } else {
+    std::cout << "tracked " << track.points.size() << " ball observations; initial "
+              << "velocity is (" << track.initial_velocity_px_per_s.x << ", "
+              << track.initial_velocity_px_per_s.y << ") px/s\n";
+  }
+
+  cv::VideoCapture visualization_cap(input_path.string());
+  if (!visualization_cap.isOpened()) {
+    std::cerr << "error reopening video file for annotation: " << input_path << '\n';
+    return false;
+  }
+
+  cv::VideoWriter output(
+      output_path.string(),
+      cv::VideoWriter::fourcc('m', 'p', '4', 'v'),
+      output_fps,
+      frame_size);
+  if (!output.isOpened()) {
+    std::cerr << "error creating output video: " << output_path << '\n';
+    return false;
+  }
+
+  frame_index = 0;
+  while (visualization_cap.read(frame)) {
+    if (tee_ball.has_value()) {
+      draw_tee_marker(frame, *tee_ball, frame_index);
+    }
+    draw_track_overlay(frame, track, frame_index);
     output.write(frame);
+    ++frame_index;
   }
 
   std::cout << "wrote tracking video to " << output_path << '\n';
   std::cout << "wrote ball observations to " << observations_path << '\n';
+  std::cout << "wrote ball track to " << track_path << '\n';
 
   return true;
 }
